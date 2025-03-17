@@ -8,8 +8,12 @@
 #include <IRsend.h>
 #include <Blinker.h>
 
-// 功能切换宏：1 表示启用红外功能，0 表示启用WiFi功能
-#define FUNCTION_MODE 1
+// 功能切换宏：1 表示启用，0 表示关闭
+#define FUNCTION_AC 0
+#define FUNCTION_TV 0
+#define FUNCTION_FIR 0
+#define FUNCTION_WIFI 0
+#define FUNCTION_ASR 1
 
 // 红外相关定义
 const uint16_t kIrLed = 4;  // 使用的GPIO引脚，推荐使用D2（GPIO4）
@@ -29,6 +33,12 @@ uint16_t TVon[67] = {9042, 4450, 604, 546, 602, 526, 602, 526, 602, 526, 602, 52
 BlinkerButton Button1(BUTTON_1); // 创建按钮对象
 char auth[] = "aa0df37ab04a"; // 设备密钥，用于连接点灯Blinker APP
 
+// 全局变量
+bool isProcessing = false;               // 防止重复执行的标志位
+unsigned long lastCommandTime = 0;       // 上次指令执行时间
+const unsigned long MIN_INTERVAL = 2000; // 最小间隔时间（毫秒）
+
+
 // 按钮回调函数，切换内置LED状态
 void button1_callback(const String &state)
 {
@@ -46,9 +56,9 @@ void setup()
 {
     // 初始化红外发送模块
     irsend.begin();
-    
-    // 初始化串口通信，设置波特率为115200
-    Serial.begin(115200);
+
+    // 初始化串口通信，设置波特率为9600
+    Serial.begin(9600);
     BLINKER_DEBUG.stream(Serial); // 将调试信息输出到串口
     
     // 配置内置LED引脚为输出模式，并初始化为低电平
@@ -64,7 +74,7 @@ void setup()
 
 void loop()
 {
-#if FUNCTION_MODE
+#ifdef FUNCTION_AC
     // 发送空调开机信号
     Serial.println("On");
     irsend.sendRaw(ACon, sizeof(ACon) / sizeof(ACon[0]), khz); // 发送原始红外信号
@@ -75,16 +85,96 @@ void loop()
     Serial.println("Off");
     irsend.sendRaw(ACoff, sizeof(ACoff) / sizeof(ACoff[0]), khz); 
     delay(2000); 
+#endif
 
+#ifdef FUNCTION_TV
     // 发送电视开机信号
     Serial.println("On");
     irsend.sendRaw(TVon, sizeof(TVon) / sizeof(TVon[0]), khz); 
-    delay(2000); 
+    delay(2000);
+#endif
 
-    delay(10000); // 延时10秒，进入下一个循环
-
-#else
+#ifdef FUNCTION_WIFI
     Blinker.run();
-    
+#endif
+
+#ifdef FUNCTION_ASR
+    // 语音识别功能
+    if (Serial.available())
+    {
+        uint8_t incomingByte = Serial.read();
+
+        // 检查是否接收到0x11
+        switch (incomingByte)
+        {
+            case 0x11:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x10: AC On");
+                    irsend.sendRaw(ACon, sizeof(ACon) / sizeof(ACon[0]), khz);
+                    delay(500);                // 发送信号需要的时间
+                    lastCommandTime = millis(); // 更新时间戳
+                    isProcessing = false;
+                }
+                break;
+            case 0x10:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x11: AC Off");
+                    irsend.sendRaw(ACoff, sizeof(ACoff) / sizeof(ACoff[0]), khz);
+                    delay(500);
+                    lastCommandTime = millis();
+                    isProcessing = false;
+                }
+                break;
+            case 0x21:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x20: TV On");
+                    irsend.sendRaw(TVon, sizeof(TVon) / sizeof(TVon[0]), khz);
+                    delay(500);
+                    lastCommandTime = millis();
+                    isProcessing = false;
+                }
+                break;
+            case 0x20:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x21: TV Off");                   // 修正原代码错误
+                    irsend.sendRaw(TVon, sizeof(TVon) / sizeof(TVon[0]), khz); // 若需关机信号，需替换为对应数组
+                    delay(500);
+                    lastCommandTime = millis();
+                    isProcessing = false;
+                }
+                break;
+            case 0x31:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x30");
+                    // 添加对应逻辑
+                    lastCommandTime = millis();
+                    isProcessing = false;
+                }
+                break;
+            case 0x30:
+                if (!isProcessing && (millis() - lastCommandTime >= MIN_INTERVAL))
+                {
+                    isProcessing = true;
+                    Serial.println("Received 0x31");
+                    // 添加对应逻辑
+                    lastCommandTime = millis();
+                    isProcessing = false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
 #endif
 }
