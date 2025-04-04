@@ -7,9 +7,11 @@
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
 #include <Blinker.h>
+#include <IRrecv.h>  //接收库，IRremoteESP8266里的，不用下载
+#include <IRutils.h> //这个很重要，一定要include一下(resultToTimingInfo就是这个库的)。也是IRremoteESP8266里的,不用下载
 
 // 功能切换宏：1 表示启用，0 表示关闭
-#define FUNCTION_WIFI 0  	// WiFi
+#define FUNCTION_WIFI 1  	// WiFi
 #define FUNCTION_ASR 0   	// 语音识别
 
 #define ACON_LEN (sizeof(ACon) / sizeof(ACon[0]))
@@ -18,6 +20,9 @@
 
 #define SELECT_PIN 12   // 设备选择引脚
 #define TRIGGER_PIN 10 // 开关触发引脚
+#define LONG_PRESS_TIME 1000     // 长按判定时间(ms)
+#define LEARN_BLINK_INTERVAL 200 // LED闪烁间隔
+#define LEARN_TIMEOUT 10000      // 学习超时时间(ms) // NEW
 
 // 新增设备状态变量
 enum DeviceType
@@ -27,14 +32,15 @@ enum DeviceType
 	FAN
 };
 DeviceType currentDevice = AC;  // 初始选择空调
-bool isSelectPressed = false;
-bool isTriggerPressed = false;
-
 
 // 红外相关定义
+const uint16_t kRecvPin = 13; // 红外接收引脚
 const uint16_t kIrLed = 5;  // 使用的GPIO引脚，推荐使用D2（GPIO4）
 const int khz = 38;			// NEC协议的载波频率为38kHz
-IRsend irsend(kIrLed);      // 初始化红外发送对象
+const uint16_t kCaptureBufferSize = 1024;
+decode_results results;                      // 解码结果存储
+IRrecv irrecv(kRecvPin, kCaptureBufferSize); // NEW
+IRsend irsend(kIrLed);                       // 发射对象
 
 // 红外信号编码数组
 // ACon: 空调开机信号
@@ -58,6 +64,58 @@ char auth[] = "3496f0d8897e"; // 设备密钥，用于连接点灯Blinker APP
 bool isProcessing = false;               // 防止重复执行的标志位
 unsigned long lastCommandTime = 0;       // 上次指令执行时间
 const unsigned long MIN_INTERVAL = 2000; // 最小间隔时间（毫秒）
+bool isLearningMode = false;   // NEW
+bool isTriggerPressed = false;
+bool isSelectPressed = false;
+unsigned long buttonPressTime = 0; // 按键按下时间记录
+uint16_t learnedRawData[555];      // 学习到的红外数据
+uint16_t learnedDataLength = 0;    // 学习数据长度
+
+void startLearningMode()
+{
+    isLearningMode = true;
+    learnedDataLength = 0;
+    irrecv.enableIRIn();
+    Serial.println("\n>>> 进入学习模式 <<<");
+}
+void stopLearningMode()
+{
+    isLearningMode = false;
+    digitalWrite(LED_BUILTIN, LOW);
+    Serial.println("\n>>> 退出学习模式 <<<");
+}
+
+void processLearning()
+{
+    static unsigned long learnStartTime = 0;
+
+    if (learnStartTime == 0)
+    {
+        learnStartTime = millis();
+        Serial.println("请对准红外接收头按下遥控器...");
+    }
+
+    if (irrecv.decode(&results))
+    {
+        // 成功接收信号
+        learnedDataLength = results.rawlen - 1;
+        for (uint16_t i = 1; i <= learnedDataLength; i++)
+        {
+            learnedRawData[i - 1] = results.rawbuf[i] * kRawTick;
+        }
+        Serial.printf("已学习 %d 个时序数据\n", learnedDataLength);
+        irrecv.resume();
+        stopLearningMode();
+        learnStartTime = 0;
+    }
+    else if (millis() - learnStartTime > LEARN_TIMEOUT)
+    {
+        // 10秒超时
+        Serial.println("\n!!! 学习超时 !!!");
+        stopLearningMode();
+        learnStartTime = 0;
+    }
+}
 
 void sendIRSignal(const uint16_t *signal, size_t length, int khz)
 {
@@ -115,9 +173,11 @@ void setup()
 {
 	// 初始化红外发送模块
 	irsend.begin();
+    irrecv.enableIRIn(); // 初始化irrecv接收的这个库，必须要有
+    pinMode(kRecvPin, INPUT);
 
-	// 初始化串口通信，设置波特率
-	Serial.begin(115200);
+    // 初始化串口通信，设置波特率
+    Serial.begin(115200);
 	BLINKER_DEBUG.stream(Serial); // 将调试信息输出到串口
 	
 	// 配置内置LED引脚为输出模式，并初始化为低电平
@@ -142,34 +202,84 @@ void loop()
 {
 	// 设备选择逻辑（去抖处理）
 	bool selectPressed = digitalRead(SELECT_PIN) == LOW;
-	if (selectPressed && !isSelectPressed)
-	{
-		currentDevice = static_cast<DeviceType>((currentDevice + 1) % 3);
-        BLINKER_LOG("切换到: ", currentDevice == AC ? "空调" : currentDevice == TV ? "电视": "风扇");
+
+    // 按下瞬间记录时间
+    if (selectPressed && !isSelectPressed)
+    {
+        buttonPressTime = millis();
     }
 
-	isSelectPressed = selectPressed;
-	// 开关触发逻辑（去抖处理）
-	bool triggerPressed = digitalRead(TRIGGER_PIN) == LOW;
-	if (triggerPressed && !isTriggerPressed)
-	{
-		switch (currentDevice)
-		{
-		case AC:
-            Serial.println("触发空调信号");   
-            sendIRSignal(ACon, ACON_LEN, khz); // 发送空调开机信号
-			break;
-		case TV:
-            Serial.println("触发电视信号");
-            sendIRSignal(TVon, TVON_LEN, khz); // 发送电视开机信号
-			break;
-		case FAN:
-            Serial.println("触发风扇信号");
-            // sendIRSignal(FCon, FCON_LEN, khz); // 需补充风扇信号数组
-			break;
-		}
-	}
-	isTriggerPressed = triggerPressed;
+    // 松开时判断时长
+    if (!selectPressed && isSelectPressed)
+    {
+        unsigned long duration = millis() - buttonPressTime;
+
+        if (duration > LONG_PRESS_TIME)
+        {
+            startLearningMode();
+        }
+        else
+        {
+            currentDevice = static_cast<DeviceType>((currentDevice + 1) % 3);
+            String deviceName = currentDevice == AC ? "空调" : currentDevice == TV ? "电视"
+                                                                                   : "风扇";
+            BLINKER_LOG("切换到: ", deviceName);
+            Serial.println("当前设备: " + deviceName);
+        }
+    }
+    isSelectPressed = selectPressed;
+
+    // 处理触发按键
+    bool triggerPressed = digitalRead(TRIGGER_PIN) == LOW;
+    if (triggerPressed && !isTriggerPressed)
+    {
+        buttonPressTime = millis(); // 记录按下时刻
+        isTriggerPressed = true;
+        Serial.println("按键按下");
+    }
+    else if (!triggerPressed && isTriggerPressed)
+    {
+        unsigned long duration = millis() - buttonPressTime;
+        isTriggerPressed = false;
+
+        if (duration > LONG_PRESS_TIME)
+        {
+            if (learnedDataLength > 0)
+            {
+                Serial.printf("[长按] 发送学习信号（时长:%lums)\n", duration);
+                sendIRSignal(learnedRawData, learnedDataLength, khz);
+            }
+        }
+        else
+        {
+            Serial.printf("[短按] 设备操作（时长:%lums)\n", duration);
+            switch (currentDevice)
+            {
+            case AC:
+                sendIRSignal(ACon, ACON_LEN, khz);
+                break;
+            case TV:
+                sendIRSignal(TVon, TVON_LEN, khz);
+                break;
+            case FAN: /* 风扇逻辑 */
+                break;
+            }
+        }
+    }
+    isTriggerPressed = triggerPressed;
+
+    // 学习模式处理
+    if (isLearningMode)
+    {
+        // LED闪烁
+        static unsigned long lastBlink = 0;
+        if (millis() - lastBlink > LEARN_BLINK_INTERVAL)
+        {
+            digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+            lastBlink = millis();
+        }
+        processLearning();
+    }
 
 #if FUNCTION_WIFI
 	Blinker.run();
@@ -202,6 +312,6 @@ void loop()
 	}
 
 #endif
-
-
+    // 20ms间隔去抖
+    delay(20);
 }
