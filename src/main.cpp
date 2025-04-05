@@ -71,6 +71,8 @@ decode_results results;						 // 解码结果存储
 IRrecv irrecv(kRecvPin, kCaptureBufferSize); // NEW
 IRsend irsend(kIrLed);						 // 发射对象
 unsigned long lastButtonPressTime = 0;
+bool acState = false; 						// 空调开关状态 false-关 true-开
+
 
 // 状态标志
 bool isProcessing = false;              	 // 防止重复执行的标志位
@@ -293,7 +295,11 @@ void loop()
 			switch (currentDevice)
 			{
 			case AC:
-				sendIRSignal(ACon, ACON_LEN, khz);
+				// 切换空调状态并发送对应信号
+				acState = !acState;
+				sendIRSignal(acState ? ACon : ACoff,
+							 acState ? ACON_LEN : ACOFF_LEN, khz);
+				Serial.println(acState ? "空调开启" : "空调关闭");
 				break;
 			case TV:
 				sendIRSignal(TVon, TVON_LEN, khz);
