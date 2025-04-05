@@ -254,6 +254,11 @@ void loop()
 																				   : "风扇";
 			BLINKER_LOG("切换到: ", deviceName);
 			Serial.println("当前设备: " + deviceName);
+
+			// 新增LED反馈逻辑
+			digitalWrite(LED_BUILTIN, HIGH); // 点亮LED
+			delay(100);						 // 保持100ms
+			digitalWrite(LED_BUILTIN, LOW);	 // 关闭LED
 		}
 	}
 	isSelectPressed = selectPressed;
